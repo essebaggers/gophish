@@ -1,0 +1,205 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gophish-dev-frontend
+  labels:
+    app: gophish-dev
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: gophish-dev
+    tier: frontend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gophish-dev-backend
+  labels:
+    app: gophish-dev
+spec:
+  ports:
+    - port: 3333
+  selector:
+    app: gophish-dev
+    tier: backend
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: gophish-dev-proxy-config
+data:
+  www.conf: |
+    ;user  nginx
+    ;worker_processes  1
+    ;error_log  /var/log/nginx/error.log warn
+    ;pid        /var/run/nginx.pid
+    events {
+    ;    worker_connections  1024
+    }
+    http {
+    ;  include       /etc/nginx/mime.types
+    ;  default_type  application/octet-stream
+      log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+    ;                      '"$http_user_agent" "$http_x_forwarded_for"'
+    ;  access_log  /var/log/nginx/access.log  main
+    ;  sendfile        on
+    ;  keepalive_timeout  65
+      server {
+    ;    listen 80
+
+    ;    server_name ~^(?<subdomain>.*?)\.
+    ;    resolver kube-dns.kube-system.svc.cluster.local valid=5s
+
+        location /healthz {
+    ;      return 200
+        }
+
+        location / {
+    ;      proxy_set_header Upgrade $http_upgrade
+    ;      proxy_set_header Connection "Upgrade"
+    ;      proxy_pass http://$subdomain.dev.zpid.org
+    ;      proxy_set_header Host $host
+    ;      proxy_http_version 1.1
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gophish-dev
+spec:
+  selector:
+    matchLabels:
+      app: gophish-dev
+  replicas: 1 # tells deployment to run 1 pods matching the template
+  revisionHistoryLimit: 0
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: gophish-dev
+        tier: frontend
+    spec:
+      containers:
+        - image: crzpiddev.azurecr.io/nginx:1.21
+          name: nginx-frontend
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "0.1"
+            limits:
+              memory: "1Gi"
+              cpu: "1.0"
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-proxy-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+      volumes:
+        - name: nginx-proxy-config
+          configMap:
+            name: gophish-dev-proxy-config
+            # persistentVolumeClaim:
+            #   claimName: gophish-dev-pv-files-claim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gophish-dev-admin
+spec:
+  selector:
+    matchLabels:
+      app: gophish-dev
+  replicas: 1 # tells deployment to run 1 pods matching the template
+  revisionHistoryLimit: 0
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: gophish-dev
+        tier: backend
+    spec:
+      containers:
+        - image: crzpiddev.azurecr.io/gophish:latest
+          name: gophish
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "0.1"
+            limits:
+              memory: "1Gi"
+              cpu: "1.0"
+          ports:
+            - containerPort: 3333
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+ name: gophish-dev
+ annotations:
+   kubernetes.io/ingress.class: azure/application-gateway
+   appgw.ingress.kubernetes.io/use-private-ip: "true"
+   external-dns.alpha.kubernetes.io/hostname: gophish.dev.zpid.org
+   appgw.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+ tls:
+   - secretName: cert-devwildcard
+ rules:
+   - host: gophish.dev.zpid.org
+     http:
+       paths:
+         - path: /
+           backend:
+             service:
+               name: gophish-dev-frontend
+               port:
+                 number: 80
+           pathType: Exact
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+ name: gophish-dev.frontend
+ namespace: development
+spec:
+ podSelector:
+   matchLabels:
+     app: gophish-dev
+     tier: frontend
+ ingress:
+   - ports:
+       - port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+ name: gophish-dev.backend
+ namespace: development
+spec:
+ podSelector:
+   matchLabels:
+     app: gophish-dev
+     tier: backend
+ ingress:
+   - ports:
+       - port: 3333
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gophish-dev-pv-files-claim
+  labels:
+    app: gophish-dev
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
